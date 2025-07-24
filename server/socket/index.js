@@ -10,13 +10,8 @@ function socketHandler(io) {
 
       // Notify the user of current users in the room
       const users = getUsersInRoom(roomId);
-      socket.emit('all-users', users);
-
-      // Notify others that a new user has joined
-      socket.to(roomId).emit('user-joined', {
-        socketId: socket.id,
-        userName,
-      });
+      // Notify all users in the room (including the new user) of the updated user list
+      io.in(roomId).emit('all-users', users);
 
       console.log(`${userName} joined room: ${roomId}`);
     });
