@@ -29,6 +29,11 @@ function socketHandler(io) {
     socket.on('disconnect', () => {
       console.log(`Client disconnected: ${socket.id}`);
     });
+
+    // Handle chat messages
+    socket.on('chat-message', ({ roomId, userName, text }) => {
+      io.in(roomId).emit('chat-message', { userName, text });
+    });
   });
 }
 
