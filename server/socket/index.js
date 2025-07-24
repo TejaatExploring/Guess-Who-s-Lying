@@ -79,11 +79,13 @@ function socketHandler(io) {
         io.in(roomId).emit('all-users', { users: [], creator: null });
       } else {
         await room.save();
+        // Fetch latest room after save to ensure users array is up to date
+        const updatedRoom = await Room.findOne({ roomId });
         io.in(roomId).emit('all-users', {
-          users: room.users.map(u => ({ userName: u })),
-          creator: room.creator,
+          users: updatedRoom ? updatedRoom.users.map(u => ({ userName: u })) : [],
+          creator: updatedRoom ? updatedRoom.creator : null,
         });
-        socket.to(roomId).emit('user-left', { userName });
+        io.in(roomId).emit('user-left', { userName });
       }
     });
 
