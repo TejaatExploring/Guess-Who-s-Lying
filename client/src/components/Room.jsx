@@ -11,6 +11,16 @@ const Room = () => {
   const [sentence1, setSentence1] = useState("");
   const [sentence2, setSentence2] = useState("");
   const [messages, setMessages] = useState([]);
+
+  // Load messages from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem(`chat_${roomId}`);
+    if (saved) {
+      try {
+        setMessages(JSON.parse(saved));
+      } catch {}
+    }
+  }, [roomId]);
   const [message, setMessage] = useState("");
   const [connectionStatus, setConnectionStatus] = useState('connecting'); // 'connecting', 'connected', 'disconnected', 'reconnecting'
   // Voice chat state
@@ -228,7 +238,11 @@ const Room = () => {
       const isSelf = data.userName === userName;
       const now = new Date();
       const time = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      setMessages(prev => [...prev, { ...data, self: isSelf, time }]);
+      setMessages(prev => {
+        const updated = [...prev, { ...data, self: isSelf, time }];
+        localStorage.setItem(`chat_${roomId}`, JSON.stringify(updated));
+        return updated;
+      });
     };
 
     const handleWebRTCOffer = async ({ from, offer }) => {

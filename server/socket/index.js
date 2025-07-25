@@ -96,16 +96,21 @@ function socketHandler(io) {
     socket.on('heartbeat', ({ roomId, userName }) => {
       // Update last seen timestamp for this user in database
       Game.findOne({ gameCode: parseInt(roomId) })
-        .then(game => {
-          if (game) {
-            const player = game.players.find(p => p.name === userName && p.socketId === socket.id);
-            if (player) {
-              player.lastSeen = new Date();
-              return game.save();
+          .then(async game => {
+            if (game) {
+              const player = game.players.find(p => p.name === userName && p.socketId === socket.id);
+              if (player) {
+                player.lastSeen = new Date();
+                await game.save();
+              }
+              // If all players are disconnected, delete the game
+              if (game.players.length > 0 && game.players.every(p => !p.isConnected)) {
+                await Game.deleteOne({ gameCode: game.gameCode });
+                console.log(`Game ${game.gameCode} deleted: all players disconnected`);
+              }
             }
-          }
-        })
-        .catch(err => console.error('Error updating heartbeat:', err));
+          })
+          .catch(err => console.error('Error updating heartbeat:', err));
     });
     
     // Check if a room exists (for join validation)
@@ -135,6 +140,11 @@ function socketHandler(io) {
             await game.save();
             await emitCleanUserList(roomId);
           }
+            // If all players are disconnected, delete the game
+            if (game.players.length > 0 && game.players.every(p => !p.isConnected)) {
+              await Game.deleteOne({ gameCode: game.gameCode });
+              console.log(`Game ${game.gameCode} deleted: all players disconnected`);
+            }
         }
       } catch (err) {
         console.error(`Error cleaning stale connection for ${userName} in room ${roomId}:`, err);
@@ -148,10 +158,19 @@ function socketHandler(io) {
         return;
       }
 
+
       socket.userName = userName;
       socket.roomId = roomId;
       socket.hasJoinedRoom = true;
       socket.join(roomId);
+
+      // After loading game, check if all players are disconnected and delete if needed
+      let game = await Game.findOne({ gameCode: parseInt(roomId) });
+      if (game && game.players.length > 0 && game.players.every(p => !p.isConnected)) {
+        await Game.deleteOne({ gameCode: game.gameCode });
+        console.log(`Game ${game.gameCode} deleted: all players disconnected`);
+        game = null;
+      }
 
       try {
         // Use findOneAndUpdate with upsert for atomic operations
