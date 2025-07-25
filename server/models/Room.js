@@ -97,4 +97,17 @@ gameSchema.methods.addPlayerSafely = function(playerData) {
   return this;
 };
 
+// Method to update player socket ID
+gameSchema.methods.updatePlayerSocketId = function(playerName, newSocketId) {
+  const player = this.players.find(p => p.name === playerName);
+  if (player) {
+    const oldSocketId = player.socketId;
+    player.socketId = newSocketId;
+    player.isConnected = true;
+    console.log(`Updated ${playerName}: ${oldSocketId} -> ${newSocketId}`);
+    return true;
+  }
+  return false;
+};
+
 module.exports = mongoose.model('Game', gameSchema);

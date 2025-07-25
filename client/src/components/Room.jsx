@@ -7,6 +7,7 @@ const Room = () => {
   const [searchParams] = useSearchParams();
   const [users, setUsers] = useState([]);
   const [creator, setCreator] = useState(null);
+  const [gameState, setGameState] = useState('waiting');
   const [sentence1, setSentence1] = useState("");
   const [sentence2, setSentence2] = useState("");
   const [messages, setMessages] = useState([]);
@@ -19,6 +20,7 @@ const Room = () => {
   const [remoteStreams, setRemoteStreams] = useState([]);
   const peerConnections = useRef({});
   const [callUsers, setCallUsers] = useState([]);
+  const hasJoinedRef = useRef(false);
   const navigate = useNavigate();
 
   const userName = searchParams.get('name');
@@ -36,19 +38,26 @@ const Room = () => {
       return;
     }
 
-    socket.emit('join-room', { roomId, userName });
+    // Prevent multiple join emissions
+    if (!hasJoinedRef.current) {
+      socket.emit('join-room', { roomId, userName });
+      hasJoinedRef.current = true;
+    }
 
-    socket.on('all-users', (payload) => {
-      let userList, creatorName;
+    const handleAllUsers = (payload) => {
+      let userList, creatorName, currentGameState;
       if (Array.isArray(payload)) {
         userList = payload;
         creatorName = payload.length > 0 ? payload[0].userName : null;
+        currentGameState = 'waiting';
       } else {
         userList = payload.users;
         creatorName = payload.creator;
+        currentGameState = payload.gameState || 'waiting';
       }
       setUsers(userList);
       setCreator(creatorName);
+      setGameState(currentGameState);
       setCallUsers(userList.map(u => u.socketId));
       if (callActive && localStream) {
         userList.forEach(user => {
@@ -62,19 +71,30 @@ const Room = () => {
           }
         });
       }
-    });
-    socket.on('sentence-1', ({ sentence }) => {
+    };
+
+    const handleError = (data) => {
+      alert(data.message);
+      navigate('/');
+    };
+
+    const handleGameStateChanged = ({ gameState: newGameState }) => {
+      setGameState(newGameState);
+    };
+
+    const handleSentence1 = ({ sentence }) => {
       setSentence1(sentence);
-    });
-    socket.on('sentence-2', ({ sentence }) => {
+    };
+
+    const handleSentence2 = ({ sentence }) => {
       setSentence2(sentence);
-    });
+    };
 
-    socket.on('user-joined', (data) => {
+    const handleUserJoined = (data) => {
       setUsers((prev) => [...prev, data]);
-    });
+    };
 
-    socket.on('user-left', ({ socketId }) => {
+    const handleUserLeft = ({ socketId }) => {
       // Always request latest users from server after a user leaves
       socket.emit('get-room-users', { roomId });
       setRemoteStreams(prev => prev.filter(s => s.peerId !== socketId));
@@ -83,23 +103,22 @@ const Room = () => {
         delete peerConnections.current[socketId];
       }
       // Do NOT stop localStream or reset callActive here; only remove remote stream and peer connection for the exited user
-    });
+    };
 
-    // Listen for server response to get-room-users
-    socket.on('room-users', ({ users: latestUsers, creator: latestCreator }) => {
+    const handleRoomUsers = ({ users: latestUsers, creator: latestCreator }) => {
       setUsers(latestUsers);
       setCreator(latestCreator);
       setCallUsers(latestUsers.map(u => u.socketId));
-    });
+    };
 
-    socket.on('chat-message', (data) => {
+    const handleChatMessage = (data) => {
       const isSelf = data.userName === userName;
       const now = new Date();
       const time = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       setMessages(prev => [...prev, { ...data, self: isSelf, time }]);
-    });
+    };
 
-    socket.on('webrtc-offer', async ({ from, offer }) => {
+    const handleWebRTCOffer = async ({ from, offer }) => {
       if (from === socket.id) return;
       if (!localStream) return;
       const pc = createPeerConnection(from);
@@ -107,36 +126,53 @@ const Room = () => {
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       socket.emit('webrtc-answer', { to: from, answer });
-    });
+    };
 
-    socket.on('webrtc-answer', async ({ from, answer }) => {
+    const handleWebRTCAnswer = async ({ from, answer }) => {
       const pc = peerConnections.current[from];
       if (pc) {
         await pc.setRemoteDescription(new window.RTCSessionDescription(answer));
       }
-    });
+    };
 
-    socket.on('webrtc-ice-candidate', ({ from, candidate }) => {
+    const handleWebRTCIceCandidate = ({ from, candidate }) => {
       const pc = peerConnections.current[from];
       if (pc && candidate) {
         pc.addIceCandidate(new window.RTCIceCandidate(candidate));
       }
-    });
+    };
+
+    socket.on('all-users', handleAllUsers);
+    socket.on('error', handleError);
+    socket.on('game-state-changed', handleGameStateChanged);
+    socket.on('sentence-1', handleSentence1);
+    socket.on('sentence-2', handleSentence2);
+    socket.on('user-joined', handleUserJoined);
+    socket.on('user-left', handleUserLeft);
+    socket.on('room-users', handleRoomUsers);
+    socket.on('chat-message', handleChatMessage);
+    socket.on('webrtc-offer', handleWebRTCOffer);
+    socket.on('webrtc-answer', handleWebRTCAnswer);
+    socket.on('webrtc-ice-candidate', handleWebRTCIceCandidate);
 
     if (!callActive) {
       startCall();
     }
 
     return () => {
-      socket.off('all-users');
-      socket.off('user-joined');
-      socket.off('user-left');
-      socket.off('chat-message');
-      socket.off('sentence-1');
-      socket.off('sentence-2');
-      socket.off('webrtc-offer');
-      socket.off('webrtc-answer');
-      socket.off('webrtc-ice-candidate');
+      hasJoinedRef.current = false; // Reset join flag
+      socket.off('all-users', handleAllUsers);
+      socket.off('error', handleError);
+      socket.off('game-state-changed', handleGameStateChanged);
+      socket.off('sentence-1', handleSentence1);
+      socket.off('sentence-2', handleSentence2);
+      socket.off('user-joined', handleUserJoined);
+      socket.off('user-left', handleUserLeft);
+      socket.off('room-users', handleRoomUsers);
+      socket.off('chat-message', handleChatMessage);
+      socket.off('webrtc-offer', handleWebRTCOffer);
+      socket.off('webrtc-answer', handleWebRTCAnswer);
+      socket.off('webrtc-ice-candidate', handleWebRTCIceCandidate);
     };
   }, [roomId, userName]);
 
@@ -221,27 +257,76 @@ const Room = () => {
     <div style={{ background: '#222', minHeight: '100vh', padding: '32px' }}>
       <div style={{ background: '#fff', borderRadius: '8px', maxWidth: '1100px', margin: '0 auto', padding: '32px', boxShadow: '0 2px 16px rgba(0,0,0,0.12)' }}>
         <div style={{ textAlign: 'center', marginBottom: '24px', fontFamily: 'serif', fontWeight: 'bold', fontSize: '22px' }}>
-          Room : <span style={{ color: '#222', fontWeight: 'bold' }}>{roomId}</span>
+          Game : <span style={{ color: '#222', fontWeight: 'bold' }}>{roomId}</span>
+          <div style={{ fontSize: '16px', marginTop: '8px', color: '#666' }}>
+            Status: <span style={{ 
+              color: gameState === 'waiting' ? '#f39c12' : gameState === 'active' ? '#27ae60' : '#e74c3c',
+              fontWeight: 'bold'
+            }}>
+              {gameState === 'waiting' ? 'Waiting for players' : 
+               gameState === 'active' ? 'Game in progress' : 
+               gameState.charAt(0).toUpperCase() + gameState.slice(1)}
+            </span>
+            {gameState === 'waiting' && (
+              <span style={{ marginLeft: '10px', fontSize: '14px' }}>
+                ({users.length}/6 players)
+              </span>
+            )}
+          </div>
         </div>
         <div style={{ display: 'flex', gap: '32px', justifyContent: 'center' }}>
           {/* Users Section */}
           <div style={{ flex: 1 }}>
-            <div style={{ fontFamily: 'serif', fontSize: '18px', marginBottom: '12px' }}>Users in the room :</div>
+            <div style={{ fontFamily: 'serif', fontSize: '18px', marginBottom: '12px' }}>Players in the game :</div>
             <div style={{ background: '#d6d6d6', borderRadius: '12px', padding: '32px 16px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '32px', minHeight: '340px', alignItems: 'center', justifyItems: 'center' }}>
               {users.length === 0 ? (
-                <div style={{ gridColumn: 'span 2', color: '#888', fontSize: '20px' }}>No users</div>
+                <div style={{ gridColumn: 'span 2', color: '#888', fontSize: '20px' }}>No players</div>
               ) : (
                 users.map((user, idx) => (
-                  <div key={user.userName + idx} style={{ background: '#111', color: '#fff', fontFamily: 'serif', fontSize: '24px', borderRadius: '10px', padding: '18px 0', width: '220px', textAlign: 'center', letterSpacing: '2px', boxShadow: '0 2px 8px rgba(0,0,0,0.12)' }}>
+                  <div key={user.userName + idx} style={{ background: '#111', color: '#fff', fontFamily: 'serif', fontSize: '24px', borderRadius: '10px', padding: '18px 0', width: '220px', textAlign: 'center', letterSpacing: '2px', boxShadow: '0 2px 8px rgba(0,0,0,0.12)', position: 'relative' }}>
                     {user.userName}
+                    {creator === user.userName && (
+                      <div style={{ 
+                        position: 'absolute', 
+                        top: '-8px', 
+                        right: '-8px', 
+                        background: '#f39c12', 
+                        color: '#fff', 
+                        borderRadius: '50%', 
+                        width: '20px', 
+                        height: '20px', 
+                        fontSize: '12px', 
+                        display: 'flex', 
+                        alignItems: 'center', 
+                        justifyContent: 'center',
+                        fontWeight: 'bold'
+                      }}>
+                        ★
+                      </div>
+                    )}
                   </div>
                 ))
                 )}
             </div>
             <div style={{ display: 'flex', gap: '32px', justifyContent: 'center', marginTop: '32px' }}>
               <button onClick={handleExit} style={{ background: '#d6d6d6', border: 'none', borderRadius: '8px', padding: '12px 36px', fontFamily: 'serif', fontSize: '20px', cursor: 'pointer' }}>exit</button>
-              {creator === userName && (
-                <button onClick={handleStartSentences} style={{ background: '#d6d6d6', border: 'none', borderRadius: '8px', padding: '12px 36px', fontFamily: 'serif', fontSize: '20px', cursor: 'pointer' }}>Start</button>
+              {creator === userName && gameState === 'waiting' && (
+                <button 
+                  onClick={handleStartSentences} 
+                  disabled={users.length < 2}
+                  style={{ 
+                    background: users.length >= 2 ? '#d6d6d6' : '#999', 
+                    border: 'none', 
+                    borderRadius: '8px', 
+                    padding: '12px 36px', 
+                    fontFamily: 'serif', 
+                    fontSize: '20px', 
+                    cursor: users.length >= 2 ? 'pointer' : 'not-allowed',
+                    opacity: users.length >= 2 ? 1 : 0.6
+                  }}
+                >
+                  Start Game {users.length >= 2 ? '' : `(Need ${2 - users.length} more players)`}
+                </button>
               )}
               {callActive && (
                 <button

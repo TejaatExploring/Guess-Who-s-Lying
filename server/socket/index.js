@@ -47,6 +47,39 @@ async function saveGameWithRetry(game, socket, roomId, userName, maxAttempts = 3
 }
 
 function socketHandler(io) {
+  // Helper function to clean stale connections
+  function cleanStaleConnections(game, io) {
+    const activeSocketIds = Array.from(io.sockets.sockets.keys());
+    let hasChanges = false;
+    
+    game.players.forEach(player => {
+      if (player.socketId && player.isConnected && !activeSocketIds.includes(player.socketId)) {
+        console.log(`Cleaning stale connection for ${player.name}: ${player.socketId}`);
+        player.isConnected = false;
+        player.socketId = null;
+        hasChanges = true;
+      }
+    });
+    
+    return hasChanges;
+  }
+
+  // Periodic cleanup of stale connections (every 5 minutes)
+  setInterval(async () => {
+    try {
+      const games = await Game.find({});
+      for (const game of games) {
+        const hasStaleConnections = cleanStaleConnections(game, io);
+        if (hasStaleConnections) {
+          await game.save();
+          console.log(`Cleaned stale connections for game ${game.gameCode}`);
+        }
+      }
+    } catch (err) {
+      console.error('Error during periodic cleanup:', err);
+    }
+  }, 5 * 60 * 1000); // 5 minutes
+
   io.on('connection', (socket) => {
     console.log(`Client connected: ${socket.id}`);
 
@@ -105,6 +138,8 @@ function socketHandler(io) {
         if (updatedGame) {
           const connectedPlayers = updatedGame.players.filter(p => p.isConnected);
           const creator = connectedPlayers.length > 0 ? connectedPlayers[0].name : null;
+
+          console.log(`Emitting user list for room ${roomId}:`, connectedPlayers.map(p => `${p.name}(${p.socketId})`));
 
           io.in(roomId).emit('all-users', {
             users: connectedPlayers.map(p => ({ userName: p.name, socketId: p.socketId })),
@@ -196,6 +231,12 @@ function socketHandler(io) {
       try {
         const game = await Game.findOne({ gameCode: parseInt(roomId) });
         if (game) {
+          // Clean stale connections before sending user list
+          const hasStaleConnections = cleanStaleConnections(game, io);
+          if (hasStaleConnections) {
+            await game.save();
+          }
+          
           const connectedPlayers = game.players.filter(p => p.isConnected);
           const creator = connectedPlayers.length > 0 ? connectedPlayers[0].name : null;
           
