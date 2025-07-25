@@ -38,11 +38,15 @@ const Room = () => {
       return;
     }
 
-    // Prevent multiple join emissions
-    if (!hasJoinedRef.current) {
-      socket.emit('join-room', { roomId, userName });
-      hasJoinedRef.current = true;
+    // Prevent multiple join emissions using a ref
+    if (hasJoinedRef.current) {
+      console.log('Already joined room, skipping duplicate join');
+      return;
     }
+
+    console.log(`Joining room ${roomId} as ${userName}`);
+    socket.emit('join-room', { roomId, userName });
+    hasJoinedRef.current = true;
 
     const handleAllUsers = (payload) => {
       let userList, creatorName, currentGameState;
@@ -160,7 +164,9 @@ const Room = () => {
     }
 
     return () => {
-      hasJoinedRef.current = false; // Reset join flag
+      // Reset join flag when component unmounts
+      hasJoinedRef.current = false;
+      
       socket.off('all-users', handleAllUsers);
       socket.off('error', handleError);
       socket.off('game-state-changed', handleGameStateChanged);
@@ -232,6 +238,9 @@ const Room = () => {
   }
 
   const handleExit = () => {
+    // Reset join flag to allow rejoining
+    hasJoinedRef.current = false;
+    
     // Stop only local media tracks and close peer connections for this user
     if (localStream) {
       localStream.getTracks().forEach(track => track.stop());
@@ -241,6 +250,7 @@ const Room = () => {
     setCallActive(false);
     setLocalStream(null);
     setRemoteStreams([]);
+    
     // Emit exit-room event to server
     socket.emit('exit-room', { roomId, userName });
     navigate('/');

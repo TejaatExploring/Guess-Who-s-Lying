@@ -2,50 +2,6 @@ const Game = require('../models/Room');
 const fs = require('fs');
 const path = require('path');
 
-// Helper function to save game with retry logic
-async function saveGameWithRetry(game, socket, roomId, userName, maxAttempts = 3) {
-  let saveAttempts = 0;
-  
-  while (saveAttempts < maxAttempts) {
-    try {
-      await game.save();
-      return;
-    } catch (err) {
-      if (err.name === 'VersionError' && saveAttempts < maxAttempts - 1) {
-        // Refresh the game document and retry
-        const freshGame = await Game.findOne({ gameCode: parseInt(roomId) });
-        if (!freshGame) {
-          socket.emit('error', { message: 'Game not found' });
-          throw new Error('Game not found during retry');
-        }
-        
-        // Re-apply the changes
-        const existingPlayer = freshGame.players.find(p => p.name === userName);
-        if (existingPlayer) {
-          existingPlayer.socketId = socket.id;
-          existingPlayer.isConnected = true;
-        } else {
-          const duplicateName = freshGame.players.some(p => p.name === userName);
-          if (duplicateName) {
-            socket.emit('error', { message: 'A player with that name already exists in this game' });
-            throw new Error('Duplicate player name');
-          }
-          freshGame.players.push({ 
-            name: userName, 
-            socketId: socket.id, 
-            isConnected: true 
-          });
-        }
-        freshGame.cleanDuplicatePlayers();
-        game = freshGame; // Update reference for next iteration
-        saveAttempts++;
-      } else {
-        throw err;
-      }
-    }
-  }
-}
-
 function socketHandler(io) {
   // Helper function to clean stale connections
   function cleanStaleConnections(game, io) {
@@ -84,53 +40,111 @@ function socketHandler(io) {
     console.log(`Client connected: ${socket.id}`);
 
     socket.on('join-room', async ({ roomId, userName }) => {
+      // Prevent duplicate joins from same socket
+      if (socket.hasJoinedRoom) {
+        console.log(`Socket ${socket.id} already joined room, ignoring duplicate join`);
+        return;
+      }
+
       socket.userName = userName;
       socket.roomId = roomId;
+      socket.hasJoinedRoom = true;
       socket.join(roomId);
 
       try {
+        // Use findOneAndUpdate with upsert for atomic operations
         let game = await Game.findOne({ gameCode: parseInt(roomId) });
         
         if (!game) {
-          // Create new game
-          game = new Game({ 
-            gameCode: parseInt(roomId), 
-            players: [{ name: userName, socketId: socket.id, isConnected: true }],
-            gameState: 'waiting'
-          });
-          await game.save();
-          console.log(`New game created: ${roomId} by ${userName}`);
-        } else {
-          // Find existing player by name (regardless of connection status)
-          let existingPlayer = game.players.find(p => p.name === userName);
-          
-          if (existingPlayer) {
-            // Player exists - update their socket ID and mark as connected
-            console.log(`${userName} reconnecting to game: ${roomId} - Old socketId: ${existingPlayer.socketId}, New socketId: ${socket.id}`);
-            existingPlayer.socketId = socket.id;
-            existingPlayer.isConnected = true;
-          } else {
-            // Check if room is full (only count currently connected players)
-            const connectedPlayers = game.players.filter(p => p.isConnected);
-            if (connectedPlayers.length >= 6) {
-              socket.emit('error', { message: 'Game is full (6 players maximum)' });
+          // Try to create new game atomically
+          try {
+            game = new Game({ 
+              gameCode: parseInt(roomId), 
+              players: [{ name: userName, socketId: socket.id, isConnected: true }],
+              gameState: 'waiting'
+            });
+            await game.save();
+            console.log(`New game created: ${roomId} by ${userName}`);
+          } catch (createErr) {
+            // If game was created by another request, fetch it
+            if (createErr.code === 11000) {
+              game = await Game.findOne({ gameCode: parseInt(roomId) });
+              if (!game) {
+                socket.emit('error', { message: 'Failed to create or join game' });
+                return;
+              }
+            } else {
+              throw createErr;
+            }
+          }
+        }
+
+        // Use retry logic for updates
+        let retryCount = 0;
+        const maxRetries = 5;
+        
+        while (retryCount < maxRetries) {
+          try {
+            // Refresh game data for each attempt
+            const freshGame = await Game.findOne({ gameCode: parseInt(roomId) });
+            if (!freshGame) {
+              socket.emit('error', { message: 'Game not found' });
               return;
             }
+
+            // Find existing player by name
+            let existingPlayer = freshGame.players.find(p => p.name === userName);
             
-            // New player joining
-            game.players.push({ 
-              name: userName, 
-              socketId: socket.id, 
-              isConnected: true 
-            });
-            console.log(`${userName} joined game: ${roomId} as new player`);
+            if (existingPlayer) {
+              // Player exists - update their socket ID and mark as connected
+              if (existingPlayer.socketId !== socket.id) {
+                console.log(`${userName} reconnecting to game: ${roomId} - Old socketId: ${existingPlayer.socketId}, New socketId: ${socket.id}`);
+                existingPlayer.socketId = socket.id;
+                existingPlayer.isConnected = true;
+              } else {
+                console.log(`${userName} already connected to game: ${roomId} with socketId: ${socket.id}`);
+                existingPlayer.isConnected = true;
+              }
+            } else {
+              // Check if room is full (only count currently connected players)
+              const connectedPlayers = freshGame.players.filter(p => p.isConnected);
+              if (connectedPlayers.length >= 6) {
+                socket.emit('error', { message: 'Game is full (6 players maximum)' });
+                return;
+              }
+              
+              // New player joining
+              freshGame.players.push({ 
+                name: userName, 
+                socketId: socket.id, 
+                isConnected: true 
+              });
+              console.log(`${userName} joined game: ${roomId} as new player`);
+            }
+            
+            // Clean duplicates before saving
+            freshGame.cleanDuplicatePlayers();
+            
+            // Try to save
+            await freshGame.save();
+            break; // Success, exit retry loop
+            
+          } catch (saveErr) {
+            retryCount++;
+            if (saveErr.name === 'VersionError' && retryCount < maxRetries) {
+              console.log(`Version conflict for ${userName} in room ${roomId}, retrying... (${retryCount}/${maxRetries})`);
+              // Small delay before retry
+              await new Promise(resolve => setTimeout(resolve, 50 * retryCount));
+              continue;
+            } else {
+              throw saveErr;
+            }
           }
-          
-          // Clean any potential duplicates before saving
-          game.cleanDuplicatePlayers();
-          
-          // Save the game with the updated socket ID
-          await game.save();
+        }
+
+        if (retryCount >= maxRetries) {
+          socket.emit('error', { message: 'Failed to join room due to high traffic. Please try again.' });
+          return;
         }
 
         // Get fresh game data and emit to all users
@@ -191,6 +205,9 @@ function socketHandler(io) {
 
     socket.on('exit-room', async ({ roomId, userName }) => {
       try {
+        // Reset join flag
+        socket.hasJoinedRoom = false;
+        
         const game = await Game.findOne({ gameCode: parseInt(roomId) });
         if (!game) return;
 
@@ -205,6 +222,7 @@ function socketHandler(io) {
         if (game.players.length > 0 && game.players[0].name === userName) {
           await Game.deleteOne({ gameCode: parseInt(roomId) });
           io.in(roomId).emit('all-users', { users: [], creator: null });
+          console.log(`Game ${roomId} deleted - creator exited`);
         } else {
           await game.save();
           // Fetch latest game after save to ensure players array is up to date
@@ -213,10 +231,11 @@ function socketHandler(io) {
           const creator = connectedPlayers.length > 0 ? connectedPlayers[0].name : null;
           
           io.in(roomId).emit('all-users', {
-            users: connectedPlayers.map(p => ({ userName: p.name })),
+            users: connectedPlayers.map(p => ({ userName: p.name, socketId: p.socketId })),
             creator: creator,
           });
           io.in(roomId).emit('user-left', { userName });
+          console.log(`${userName} exited game: ${roomId}`);
         }
       } catch (err) {
         console.error(`Error exiting room ${roomId}:`, err);
@@ -252,6 +271,9 @@ function socketHandler(io) {
 
     socket.on('disconnect', async () => {
       console.log(`Client disconnected: ${socket.id}`);
+      
+      // Reset join flag
+      socket.hasJoinedRoom = false;
       
       // Handle cleanup when a user disconnects unexpectedly
       if (socket.userName && socket.roomId) {
