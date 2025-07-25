@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import socket from '../socket';
 
 const JoinRoom = () => {
   const [roomId, setRoomId] = useState('');
@@ -30,24 +31,28 @@ const JoinRoom = () => {
 
   const handleJoin = () => {
     if (!validateInput()) return;
-    
+
     if (!roomId || !roomId.trim()) {
       alert('Please enter a Room ID');
       return;
     }
-    
+
     if (!/^\d{6}$/.test(roomId.trim())) {
       alert('Room ID must be a 6-digit number');
       return;
     }
 
     setLoading(true);
-    
-    // Navigate to room
-    setTimeout(() => {
-      navigate(`/room/${roomId.trim()}?name=${encodeURIComponent(userName.trim())}`);
+
+    // Check with backend if room exists
+    socket.emit('check-room-exists', { roomId: roomId.trim() }, (response) => {
+      if (response && response.exists) {
+        navigate(`/room/${roomId.trim()}?name=${encodeURIComponent(userName.trim())}`);
+      } else {
+        alert('Room ID does not exist.');
+      }
       setLoading(false);
-    }, 500);
+    });
   };
 
   const handleCreate = () => {

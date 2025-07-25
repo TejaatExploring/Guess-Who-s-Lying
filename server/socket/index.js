@@ -37,6 +37,16 @@ function socketHandler(io) {
   }, 5 * 60 * 1000); // 5 minutes
 
   io.on('connection', (socket) => {
+    // Check if a room exists (for join validation)
+    socket.on('check-room-exists', async ({ roomId }, callback) => {
+      try {
+        // Room/gameCode is stored as a number, so parse roomId
+        const game = await Game.findOne({ gameCode: Number(roomId) });
+        callback({ exists: !!game });
+      } catch (err) {
+        callback({ exists: false });
+      }
+    });
     console.log(`Client connected: ${socket.id}`);
 
     socket.on('join-room', async ({ roomId, userName }) => {
