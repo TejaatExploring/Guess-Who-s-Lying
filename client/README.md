@@ -1,12 +1,82 @@
-# React + Vite
+# Voice Chat App - Client
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Frontend for the Voice Chat Game application built with React and Vite.
 
-Currently, two official plugins are available:
+## Features
+- Real-time multiplayer game interface
+- Voice chat integration
+- Room creation and joining
+- Responsive design
+- Socket.io client for real-time updates
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## Environment Variables
 
-## Expanding the ESLint configuration
+Copy `.env.example` to `.env` and configure:
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+```bash
+cp .env.example .env
+```
+
+Required environment variables:
+- `VITE_SERVER_URL`: Backend server URL
+
+## Local Development
+
+1. Install dependencies:
+```bash
+npm install
+```
+
+2. Set up environment variables in `.env`
+
+3. Start development server:
+```bash
+npm run dev
+```
+
+4. Build for production:
+```bash
+npm run build
+```
+
+## Deployment to Vercel
+
+1. Install Vercel CLI:
+```bash
+npm i -g vercel
+```
+
+2. Deploy:
+```bash
+vercel
+```
+
+3. Set environment variables in Vercel dashboard:
+   - `VITE_SERVER_URL`: Your deployed backend URL
+
+## Tech Stack
+
+- React 19
+- Vite 7
+- React Router DOM
+- Socket.io Client
+- WebRTC for voice chat
+
+## Project Structure
+
+```
+src/
+├── components/
+│   ├── JoinRoom.jsx    # Landing page for joining/creating games
+│   └── Room.jsx        # Main game room interface
+├── socket.js           # Socket.io client configuration
+├── App.jsx            # Main app component with routing
+└── main.jsx           # Entry point
+```
+
+## Game Rules
+
+- Maximum 6 players per game
+- Creator starts the sentences
+- Voice chat available during game
+- Real-time chat messaging
