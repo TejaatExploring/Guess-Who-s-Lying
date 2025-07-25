@@ -12,6 +12,7 @@ const Room = () => {
   const [sentence2, setSentence2] = useState("");
   const [messages, setMessages] = useState([]);
   const [message, setMessage] = useState("");
+  const [connectionStatus, setConnectionStatus] = useState('connecting'); // 'connecting', 'connected', 'disconnected', 'reconnecting'
   // Voice chat state
   const [callActive, setCallActive] = useState(false);
   const [micMuted, setMicMuted] = useState(false);
@@ -45,7 +46,20 @@ const Room = () => {
     }
 
     console.log(`Joining room ${roomId} as ${userName}`);
-    socket.emit('join-room', { roomId, userName });
+    
+    // Clean up any stale connections before joining
+    socket.emit('cleanup-stale-connection', { roomId, userName });
+    
+    // Small delay to ensure cleanup completes before joining
+    setTimeout(() => {
+      socket.emit('join-room', { roomId, userName });
+      
+      // Request fresh room data after a short delay to ensure consistency
+      setTimeout(() => {
+        socket.emit('get-room-users', { roomId });
+      }, 200);
+    }, 100);
+    
     hasJoinedRef.current = true;
 
     const handleAllUsers = (payload) => {
@@ -59,19 +73,64 @@ const Room = () => {
         creatorName = payload.creator;
         currentGameState = payload.gameState || 'waiting';
       }
+      
+      console.log('Received all-users update:', { userList, creatorName, currentGameState });
+      
       setUsers(userList);
       setCreator(creatorName);
       setGameState(currentGameState);
       setCallUsers(userList.map(u => u.socketId));
+      setConnectionStatus('connected'); // Mark as connected when we receive user list
+      
+      // Always restart WebRTC connections when user list changes to ensure stable mesh
       if (callActive && localStream) {
+        console.log('Rebuilding WebRTC mesh due to user list change...');
+        
+        // Get current peer IDs
+        const currentPeerIds = Object.keys(peerConnections.current);
+        const newUserIds = userList.map(u => u.socketId).filter(id => id !== socket.id);
+        
+        // Close connections to users no longer in the room
+        currentPeerIds.forEach(peerId => {
+          if (!newUserIds.includes(peerId)) {
+            console.log(`Closing connection to removed user: ${peerId}`);
+            if (peerConnections.current[peerId]) {
+              peerConnections.current[peerId].close();
+              delete peerConnections.current[peerId];
+            }
+          }
+        });
+        
+        // Remove remote streams for users no longer in the room
+        setRemoteStreams(prev => prev.filter(stream => 
+          newUserIds.includes(stream.peerId)
+        ));
+        
+        // Establish connections to all users (new and existing)
+        // This ensures robust mesh even when someone refreshes
         userList.forEach(user => {
-          if (user.socketId !== socket.id && !peerConnections.current[user.socketId]) {
-            const pc = createPeerConnection(user.socketId);
-            localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-            pc.createOffer().then(offer => {
-              pc.setLocalDescription(offer);
-              socket.emit('webrtc-offer', { to: user.socketId, offer });
-            });
+          if (user.socketId !== socket.id) {
+            if (!peerConnections.current[user.socketId]) {
+              console.log(`Creating new connection to user: ${user.userName} (${user.socketId})`);
+              const pc = createPeerConnection(user.socketId);
+              localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+              pc.createOffer().then(offer => {
+                pc.setLocalDescription(offer);
+                socket.emit('webrtc-offer', { to: user.socketId, offer });
+              });
+            } else {
+              console.log(`Connection already exists to user: ${user.userName} (${user.socketId})`);
+              // Ensure the existing connection has our tracks
+              const pc = peerConnections.current[user.socketId];
+              const senders = pc.getSenders();
+              localStream.getTracks().forEach(track => {
+                const sender = senders.find(s => s.track === track);
+                if (!sender) {
+                  console.log(`Adding missing track to existing connection: ${user.socketId}`);
+                  pc.addTrack(track, localStream);
+                }
+              });
+            }
           }
         });
       }
@@ -98,15 +157,65 @@ const Room = () => {
       setUsers((prev) => [...prev, data]);
     };
 
-    const handleUserLeft = ({ socketId }) => {
+    const handleUserLeft = ({ userName: leftUserName }) => {
       // Always request latest users from server after a user leaves
       socket.emit('get-room-users', { roomId });
-      setRemoteStreams(prev => prev.filter(s => s.peerId !== socketId));
-      if (peerConnections.current[socketId]) {
-        peerConnections.current[socketId].close();
-        delete peerConnections.current[socketId];
+      
+      // Find and remove the user's socket ID for WebRTC cleanup
+      const leftUser = users.find(u => u.userName === leftUserName);
+      if (leftUser) {
+        setRemoteStreams(prev => prev.filter(s => s.peerId !== leftUser.socketId));
+        if (peerConnections.current[leftUser.socketId]) {
+          peerConnections.current[leftUser.socketId].close();
+          delete peerConnections.current[leftUser.socketId];
+        }
       }
-      // Do NOT stop localStream or reset callActive here; only remove remote stream and peer connection for the exited user
+    };
+
+    const handleCreatorReconnected = ({ creatorName, shouldRebuildConnections }) => {
+      console.log(`Creator ${creatorName} has reconnected`);
+      setMessages(prev => [...prev, {
+        userName: 'System',
+        text: `${creatorName} (Creator) has reconnected`,
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        self: false
+      }]);
+      
+      // Force refresh room data
+      setTimeout(() => {
+        socket.emit('get-room-users', { roomId });
+      }, 500);
+    };
+
+    const handleCreatorDisconnected = ({ creatorName, message }) => {
+      console.log(`Creator ${creatorName} disconnected: ${message}`);
+      setConnectionStatus('reconnecting'); // Set status to reconnecting when creator disconnects
+      setMessages(prev => [...prev, {
+        userName: 'System',
+        text: message,
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        self: false
+      }]);
+    };
+
+    const handleCreatorChanged = ({ newCreator, message }) => {
+      console.log(`Creator changed to ${newCreator}: ${message}`);
+      setCreator(newCreator);
+      setMessages(prev => [...prev, {
+        userName: 'System',
+        text: message,
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        self: false
+      }]);
+      
+      // Refresh room data
+      socket.emit('get-room-users', { roomId });
+    };
+
+    const handleGameEnded = ({ message }) => {
+      console.log(`Game ended: ${message}`);
+      alert(message);
+      navigate('/');
     };
 
     const handleRoomUsers = ({ users: latestUsers, creator: latestCreator }) => {
@@ -124,8 +233,26 @@ const Room = () => {
 
     const handleWebRTCOffer = async ({ from, offer }) => {
       if (from === socket.id) return;
-      if (!localStream) return;
+      if (!localStream) {
+        console.log('Received WebRTC offer but no local stream available, starting call...');
+        await startCall();
+        if (!localStream) return;
+      }
+      
+      console.log(`Received WebRTC offer from ${from}`);
+      
+      // If we already have a connection to this peer, close it first
+      if (peerConnections.current[from]) {
+        console.log(`Closing existing connection to ${from} before accepting new offer`);
+        peerConnections.current[from].close();
+        delete peerConnections.current[from];
+      }
+      
       const pc = createPeerConnection(from);
+      
+      // Add local stream tracks to the peer connection
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+      
       await pc.setRemoteDescription(new window.RTCSessionDescription(offer));
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
@@ -146,6 +273,33 @@ const Room = () => {
       }
     };
 
+    const handleWebRTCMeshRefresh = ({ rejoinedUser, isCreatorReconnecting }) => {
+      console.log(`WebRTC mesh refresh triggered by ${rejoinedUser} (creator: ${isCreatorReconnecting})`);
+      if (callActive && localStream) {
+        // Force rebuild all connections after a delay, longer for creator reconnection
+        setTimeout(() => {
+          console.log('Force rebuilding WebRTC mesh...');
+          users.forEach(user => {
+            if (user.socketId !== socket.id) {
+              // Close existing connection if it exists
+              if (peerConnections.current[user.socketId]) {
+                peerConnections.current[user.socketId].close();
+                delete peerConnections.current[user.socketId];
+              }
+              
+              // Create new connection
+              const pc = createPeerConnection(user.socketId);
+              localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+              pc.createOffer().then(offer => {
+                pc.setLocalDescription(offer);
+                socket.emit('webrtc-offer', { to: user.socketId, offer });
+              });
+            }
+          });
+        }, isCreatorReconnecting ? 1500 : 200);
+      }
+    };
+
     socket.on('all-users', handleAllUsers);
     socket.on('error', handleError);
     socket.on('game-state-changed', handleGameStateChanged);
@@ -153,17 +307,62 @@ const Room = () => {
     socket.on('sentence-2', handleSentence2);
     socket.on('user-joined', handleUserJoined);
     socket.on('user-left', handleUserLeft);
+    socket.on('creator-reconnected', handleCreatorReconnected);
+    socket.on('creator-disconnected', handleCreatorDisconnected);
+    socket.on('creator-changed', handleCreatorChanged);
+    socket.on('game-ended', handleGameEnded);
     socket.on('room-users', handleRoomUsers);
     socket.on('chat-message', handleChatMessage);
     socket.on('webrtc-offer', handleWebRTCOffer);
     socket.on('webrtc-answer', handleWebRTCAnswer);
     socket.on('webrtc-ice-candidate', handleWebRTCIceCandidate);
+    socket.on('webrtc-mesh-refresh', handleWebRTCMeshRefresh);
+
+    // Socket connection status events
+    socket.on('connect', () => {
+      console.log('Socket connected');
+      setConnectionStatus('connected');
+    });
+
+    socket.on('disconnect', (reason) => {
+      console.log('Socket disconnected:', reason);
+      setConnectionStatus('disconnected');
+      
+      // Try to reconnect automatically
+      setTimeout(() => {
+        if (!socket.connected) {
+          setConnectionStatus('reconnecting');
+          socket.connect();
+        }
+      }, 2000);
+    });
+
+    socket.on('reconnect', () => {
+      console.log('Socket reconnected');
+      setConnectionStatus('connected');
+      
+      // Rejoin the room after reconnection
+      if (hasJoinedRef.current) {
+        socket.emit('join-room', { roomId, userName });
+        socket.emit('get-room-users', { roomId });
+      }
+    });
 
     if (!callActive) {
       startCall();
     }
 
+    // Send heartbeat every 10 seconds to maintain connection
+    const heartbeatInterval = setInterval(() => {
+      if (socket.connected && hasJoinedRef.current) {
+        socket.emit('heartbeat', { roomId, userName });
+      }
+    }, 10000);
+
     return () => {
+      // Clear heartbeat interval
+      clearInterval(heartbeatInterval);
+      
       // Reset join flag when component unmounts
       hasJoinedRef.current = false;
       
@@ -174,11 +373,19 @@ const Room = () => {
       socket.off('sentence-2', handleSentence2);
       socket.off('user-joined', handleUserJoined);
       socket.off('user-left', handleUserLeft);
+      socket.off('creator-reconnected', handleCreatorReconnected);
+      socket.off('creator-disconnected', handleCreatorDisconnected);
+      socket.off('creator-changed', handleCreatorChanged);
+      socket.off('game-ended', handleGameEnded);
       socket.off('room-users', handleRoomUsers);
       socket.off('chat-message', handleChatMessage);
       socket.off('webrtc-offer', handleWebRTCOffer);
       socket.off('webrtc-answer', handleWebRTCAnswer);
       socket.off('webrtc-ice-candidate', handleWebRTCIceCandidate);
+      socket.off('webrtc-mesh-refresh', handleWebRTCMeshRefresh);
+      socket.off('connect');
+      socket.off('disconnect');
+      socket.off('reconnect');
     };
   }, [roomId, userName]);
 
@@ -211,29 +418,72 @@ const Room = () => {
   };
 
   function createPeerConnection(peerId) {
-    if (peerConnections.current[peerId]) return peerConnections.current[peerId];
-    const pc = new window.RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+    // If connection already exists and is in a good state, reuse it
+    if (peerConnections.current[peerId]) {
+      const existingPc = peerConnections.current[peerId];
+      if (existingPc.connectionState === 'connected' || existingPc.connectionState === 'connecting') {
+        console.log(`Reusing existing peer connection for ${peerId} (state: ${existingPc.connectionState})`);
+        return existingPc;
+      } else {
+        console.log(`Closing existing peer connection for ${peerId} (state: ${existingPc.connectionState})`);
+        existingPc.close();
+        delete peerConnections.current[peerId];
+      }
+    }
+    
+    console.log(`Creating new peer connection for ${peerId}`);
+    const pc = new window.RTCPeerConnection({ 
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' }
+      ] 
+    });
     peerConnections.current[peerId] = pc;
+    
     pc.onicecandidate = event => {
       if (event.candidate) {
         socket.emit('webrtc-ice-candidate', { to: peerId, candidate: event.candidate });
       }
     };
+    
     pc.ontrack = event => {
+      console.log(`Received remote stream from ${peerId}`);
       setRemoteStreams(prev => {
-        // Prevent duplicate streams
-        const already = prev.find(s => s.id === event.streams[0].id);
-        if (already) return prev;
-        // Attach peerId for cleanup
-        return [...prev, { ...event.streams[0], peerId }];
+        // Remove any existing streams from this peer first
+        const filtered = prev.filter(s => s.peerId !== peerId);
+        // Add the new stream
+        const newStream = { ...event.streams[0], peerId };
+        return [...filtered, newStream];
       });
     };
+    
     pc.onconnectionstatechange = () => {
+      console.log(`Connection state changed for ${peerId}: ${pc.connectionState}`);
       if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+        console.log(`Cleaning up failed connection for ${peerId}`);
         pc.close();
         delete peerConnections.current[peerId];
+        // Remove remote stream for this peer
+        setRemoteStreams(prev => prev.filter(s => s.peerId !== peerId));
+        
+        // Try to reestablish connection if the user is still in the room
+        setTimeout(() => {
+          if (users.some(u => u.socketId === peerId) && localStream) {
+            console.log(`Attempting to reestablish connection to ${peerId}`);
+            const newPc = createPeerConnection(peerId);
+            localStream.getTracks().forEach(track => newPc.addTrack(track, localStream));
+            newPc.createOffer().then(offer => {
+              newPc.setLocalDescription(offer);
+              socket.emit('webrtc-offer', { to: peerId, offer });
+            });
+          }
+        }, 1000);
+      } else if (pc.connectionState === 'connected') {
+        console.log(`Successfully connected to ${peerId}`);
       }
     };
+    
     return pc;
   }
 
@@ -282,6 +532,18 @@ const Room = () => {
                 ({users.length}/6 players)
               </span>
             )}
+          </div>
+          <div style={{ fontSize: '14px', marginTop: '4px' }}>
+            Connection: <span style={{ 
+              color: connectionStatus === 'connected' ? '#27ae60' : 
+                     connectionStatus === 'connecting' ? '#f39c12' :
+                     connectionStatus === 'reconnecting' ? '#e67e22' : '#e74c3c',
+              fontWeight: 'bold'
+            }}>
+              {connectionStatus === 'connected' ? '🟢 Connected' :
+               connectionStatus === 'connecting' ? '🟡 Connecting...' :
+               connectionStatus === 'reconnecting' ? '🟠 Reconnecting...' : '🔴 Disconnected'}
+            </span>
           </div>
         </div>
         <div style={{ display: 'flex', gap: '32px', justifyContent: 'center' }}>

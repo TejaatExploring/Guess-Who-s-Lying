@@ -12,6 +12,14 @@ const playerSchema = new mongoose.Schema({
   isConnected: {
     type: Boolean,
     default: false
+  },
+  isCreator: {
+    type: Boolean,
+    default: false
+  },
+  lastSeen: {
+    type: Date,
+    default: Date.now
   }
 });
 
