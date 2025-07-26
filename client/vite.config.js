@@ -6,7 +6,7 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: false,
-    minify: 'esbuild', // Changed from 'terser' for better Vercel compatibility
+    minify: 'esbuild',
     target: 'esnext',
     rollupOptions: {
       output: {
@@ -25,5 +25,8 @@ export default defineConfig({
   preview: {
     port: 4173,
     host: true
+  },
+  define: {
+    global: 'globalThis',
   }
 });
