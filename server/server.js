@@ -13,12 +13,31 @@ const server = http.createServer(app);
 const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
 const CORS_ORIGINS = process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : [CLIENT_URL];
 
+console.log('CORS Origins:', CORS_ORIGINS);
+console.log('Client URL:', CLIENT_URL);
+
 app.use(cors({ 
   origin: CORS_ORIGINS,
-  credentials: true 
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 app.use(express.json());
+
+// Add additional middleware for Vercel compatibility
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', CLIENT_URL);
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin,X-Requested-With,Content-Type,Accept,Authorization');
+  
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+  } else {
+    next();
+  }
+});
 
 const io = new Server(server, {
   cors: {
@@ -26,6 +45,12 @@ const io = new Server(server, {
     methods: ['GET', 'POST'],
     credentials: true
   },
+  // Add these for better Vercel compatibility
+  transports: ['websocket', 'polling'],
+  allowUpgrades: true,
+  upgradeTimeout: 10000,
+  pingTimeout: 5000,
+  pingInterval: 10000
 });
 
 // Health check endpoint
@@ -33,6 +58,17 @@ app.get('/', (req, res) => {
   res.json({ 
     message: 'Voice Chat Server is running!', 
     status: 'healthy',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Debug endpoint to check environment variables
+app.get('/debug', (req, res) => {
+  res.json({ 
+    environment: process.env.NODE_ENV,
+    clientUrl: CLIENT_URL,
+    corsOrigins: CORS_ORIGINS,
+    mongoConnected: mongoose.connection.readyState === 1,
     timestamp: new Date().toISOString()
   });
 });
