@@ -1,5 +1,5 @@
 {
-  "name": "voice-chat-app",
+  "name": "guess-whos-lying",
   "version": "1.0.0",
   "description": "Real-time voice chat application with Socket.IO and WebRTC",
   "scripts": {
@@ -17,7 +17,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-username/voice-chat-app.git"
+    "url": "https://github.com/TejaatExploring/Guess-who-s-Lying.git"
   },
   "keywords": [
     "voice-chat",

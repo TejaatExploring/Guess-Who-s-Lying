@@ -1,5 +1,5 @@
 {
-  "name": "voice-chat-server",
+  "name": "guess-whos-lying-server",
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
