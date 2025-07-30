@@ -20,7 +20,9 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    host: true
+    host: true,
+    // Added to allow the specified host
+    allowedHosts: ['guess-who-s-lying-client.onrender.com']
   },
   preview: {
     port: 4173,
